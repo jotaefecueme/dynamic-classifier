@@ -48,7 +48,7 @@ class Classification(BaseModel):
     explanation: str = Field(..., description="Explanation of how the intents and entities were identified.")
     language: str = Field(..., description="Language code (ISO 639-1) of the input, e.g., 'en' or 'es'.")
 
-# Classification
+# Classification function
 def classify_input(user_input: str, intents: dict, entities: dict):
     intents_with_desc = "\n".join(f"- {intent}: {desc}" for intent, desc in intents.items())
     entities_with_desc = "\n".join(f"- {entity}: {desc}" for entity, desc in entities.items())
@@ -70,12 +70,13 @@ def classify_input(user_input: str, intents: dict, entities: dict):
     start = time.time()
     try:
         response = llm.invoke(prompt.format(user_input=user_input))
-    except Exception:
+    except Exception as e:
         raise HTTPException(status_code=500, detail="Error processing the input with the model.")
     end = time.time()
 
     return response.model_dump(), end - start
 
+# Function to log classification results to Google Sheets
 def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_time: float):
     now = datetime.now()
     date = now.strftime("%Y-%m-%d")
@@ -97,19 +98,25 @@ def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_ti
     ]
     sheet.append_row(row)
 
+# API endpoint to classify input text
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
     ip = request.client.host
     try:
         result, response_time = classify_input(req.user_input, req.intents, req.entities)
         log_to_gsheet(ip, req, result, response_time)
+
+        # Eliminar el archivo de credenciales temporal después de usarlo
+        if os.path.exists("google_creds.json"):
+            os.remove("google_creds.json")
+
         return {"result": result, "response_time": f"{response_time:.2f} seconds"}
     except HTTPException as e:
-
         raise e
     except Exception as e:
-        error_details = str(e)  
-        return HTTPException(status_code=500, detail=f"Internal server error: {error_details}")
+        # Para evitar exponer información sensible del error
+        error_details = "Internal server error"
+        return HTTPException(status_code=500, detail=error_details)
 
 if __name__ == "__main__":
     import uvicorn
