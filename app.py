@@ -107,7 +107,7 @@ async def classify_via_api(req: ClassificationRequest, request: Request):
     except HTTPException as e:
         raise e
     except Exception as e:
-        error_details = str(e)  # Esto captura el mensaje real del error
+        error_details = str(e)
         raise HTTPException(status_code=500, detail=f"Internal server error: {error_details}")
 
 
