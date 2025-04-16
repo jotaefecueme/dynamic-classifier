@@ -89,9 +89,11 @@ def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_ti
     row = [
         ip, date, time_of_day, input_text, input_intent, input_entity,
         response_intent, response_entity, response_explanation, response_language,
-        f"{response_time:.2f}"
+        f"{response_time:.2f}", model_name, model_provider, temperature
     ]
+    
     sheet.append_row(row)
+
 
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
