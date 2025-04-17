@@ -112,6 +112,9 @@ async def classify_via_api(req: ClassificationRequest, request: Request):
         error_details = str(e)
         raise HTTPException(status_code=500, detail=f"Internal server error: {error_details}")
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
