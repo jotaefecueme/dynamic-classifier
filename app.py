@@ -16,23 +16,28 @@ load_dotenv()
 app = FastAPI()
 
 sheet_url = os.getenv("SHEET_URL")
-creds_base64 = os.getenv("CREDS")  
+creds_base64 = os.getenv("CREDS")
 groq_api_key = os.getenv("GROQ_API_KEY")
 model_name = os.getenv("MODEL_NAME")
 model_provider = os.getenv("MODEL_PROVIDER")
 temperature = float(os.getenv("MODEL_TEMPERATURE"))
 
 if not sheet_url or not creds_base64 or not groq_api_key:
-    raise ValueError("The environment variables 'SHEET_URL', 'GOOGLE_CREDS_BASE64', and 'GROQ_API_KEY' are required.")
+    raise ValueError("The environment variables 'SHEET_URL', 'CREDS', and 'GROQ_API_KEY' are required.")
 
-creds_json = base64.b64decode(creds_base64).decode('utf-8')
-with open("google_creds.json", "w") as f:
-    f.write(creds_json)
+creds_json_dict = json.loads(base64.b64decode(creds_base64).decode('utf-8'))
 
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("google_creds.json", scope)
+creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json_dict, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url(sheet_url).sheet1
+
+llm = init_chat_model(
+    model_name,
+    model_provider=model_provider,
+    temperature=temperature,
+    api_key=groq_api_key
+)
 
 class ClassificationRequest(BaseModel):
     user_input: str = Field(..., description="Text provided by the user for classification.")
@@ -60,14 +65,14 @@ def classify_input(user_input: str, intents: dict, entities: dict):
         {user_input}
         """
     )
-
-    llm = init_chat_model(model_name, model_provider=model_provider, temperature=temperature, api_key=groq_api_key).with_structured_output(Classification)
+    
+    llm_with_output = llm.with_structured_output(Classification)
 
     start = time.time()
     try:
-        response = llm.invoke(prompt.format(user_input=user_input))
+        response = llm_with_output.invoke(prompt.format(user_input=user_input))
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error processing the input with the model.")
+        raise HTTPException(status_code=500, detail=f"Error processing the input with the model: {str(e)}")
     end = time.time()
 
     return response.model_dump(), end - start
@@ -94,16 +99,12 @@ def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_ti
     
     sheet.append_row(row)
 
-
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
     ip = request.client.host
     try:
         result, response_time = classify_input(req.user_input, req.intents, req.entities)
         log_to_gsheet(ip, req, result, response_time)
-
-        if os.path.exists("google_creds.json"):
-            os.remove("google_creds.json")
 
         return {"result": result, "response_time": f"{response_time:.2f} seconds"}
     except HTTPException as e:
