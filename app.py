@@ -1,7 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
-from langchain_core.prompts import ChatPromptTemplate
 from datetime import datetime
 import time
 from dotenv import load_dotenv
@@ -10,108 +9,90 @@ from oauth2client.service_account import ServiceAccountCredentials
 import os
 import json
 import base64
+import logging
+from concurrent.futures import ThreadPoolExecutor
 
 load_dotenv()
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 app = FastAPI()
 
-sheet_url = os.getenv("SHEET_URL")
-creds_base64 = os.getenv("CREDS")
-groq_api_key = os.getenv("GROQ_API_KEY")
+REQUIRED = ["SHEET_URL", "CREDS", "GROQ_API_KEY", "MODEL_NAME", "MODEL_PROVIDER", "MODEL_TEMPERATURE"]
+for var in REQUIRED:
+    if not os.getenv(var):
+        raise RuntimeError(f"Falta la variable de entorno: {var}")
+
+def init_sheet():
+    data = json.loads(base64.b64decode(os.getenv("CREDS")).decode())
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(data, scope)
+    return gspread.authorize(creds).open_by_url(os.getenv("SHEET_URL")).sheet1
+sheet = init_sheet()
+
+class ClassificationRequest(BaseModel):
+    user_input: str = Field(..., description="Texto para clasificación")
+    intents: dict = Field(..., description="Intents posibles con descripciones")
+    entities: dict = Field(..., description="Entidades posibles con descripciones")
+
+class Classification(BaseModel):
+    intents: list = Field(..., description="Intents detectados en la entrada")
+    entities: dict = Field(..., description="Entidades extraídas y sus valores")
+    explanation: str = Field(..., description="Explicación de la clasificación")
+    language: str = Field(..., description="Código de idioma ISO 639-1")
+
 model_name = os.getenv("MODEL_NAME")
 model_provider = os.getenv("MODEL_PROVIDER")
 temperature = float(os.getenv("MODEL_TEMPERATURE"))
+llm = init_chat_model(model_name, model_provider=model_provider, temperature=temperature, api_key=os.getenv("GROQ_API_KEY"))
+llm_typed = llm.with_structured_output(Classification)
 
-if not sheet_url or not creds_base64 or not groq_api_key:
-    raise ValueError("The environment variables 'SHEET_URL', 'CREDS', and 'GROQ_API_KEY' are required.")
+executor = ThreadPoolExecutor(max_workers=2)
 
-creds_json_dict = json.loads(base64.b64decode(creds_base64).decode('utf-8'))
-
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json_dict, scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_url(sheet_url).sheet1
-
-llm = init_chat_model(
-    model_name,
-    model_provider=model_provider,
-    temperature=temperature,
-    api_key=groq_api_key
-)
-
-class ClassificationRequest(BaseModel):
-    user_input: str = Field(..., description="Text provided by the user for classification.")
-    intents: dict = Field(..., description="Dictionary of possible intents with their descriptions.")
-    entities: dict = Field(..., description="Dictionary of possible entities with their descriptions.")
-
-class Classification(BaseModel):
-    intents: list = Field(..., description="List of intents detected in the user's input.")
-    entities: dict = Field(..., description="Dictionary of extracted entities and their values. Only include entities mentioned in the input.")
-    explanation: str = Field(..., description="Explanation of how the intents and entities were identified.")
-    language: str = Field(..., description="Language code (ISO 639-1) of the input, e.g., 'en' or 'es'.")
-
-def classify_input(user_input: str, intents: dict, entities: dict):
-    intents_with_desc = "\n".join(f"- {intent}: {desc}" for intent, desc in intents.items())
-    entities_with_desc = "\n".join(f"- {entity}: {desc}" for entity, desc in entities.items())
-
-    prompt = ChatPromptTemplate.from_template(
-        f"""
-        Extract the desired information from the following passage.
-        Use the following list of possible intents for classification:
-        {intents_with_desc}
-        Use the following list of possible entities to detect:
-        {entities_with_desc}
-        User input:
-        {user_input}
-        """
+async def classify_input(user_input: str, intents: dict, entities: dict):
+    prompt = (
+        "Extract the desired information from the following passage.\n"
+        "Use the following list of possible intents for classification:\n" +
+        "\n".join(f"- {k}: {v}" for k, v in intents.items()) +
+        "\nUse the following list of possible entities to detect:\n" +
+        "\n".join(f"- {k}: {v}" for k, v in entities.items()) +
+        "\nUser input:\n" + user_input
     )
-    
-    llm_with_output = llm.with_structured_output(Classification)
-
     start = time.time()
     try:
-        response = llm_with_output.invoke(prompt.format(user_input=user_input))
+        response = llm_typed.invoke(prompt)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing the input with the model: {str(e)}")
-    end = time.time()
+        logging.error(f"LLM invocation error: {e}")
+        raise HTTPException(status_code=500, detail="Error procesando el modelo")
+    return response.model_dump(), time.time() - start
 
-    return response.model_dump(), end - start
-
-def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_time: float):
-    now = datetime.now()
-    date = now.strftime("%Y-%m-%d")
-    time_of_day = now.strftime("%H:%M:%S")
-
-    input_text = req.user_input
-    input_intent = json.dumps(req.intents, ensure_ascii=False)
-    input_entity = json.dumps(req.entities, ensure_ascii=False)
-
-    response_intent = json.dumps(result.get("intents", []), ensure_ascii=False)
-    response_entity = json.dumps(result.get("entities", {}), ensure_ascii=False)
-    response_explanation = result.get("explanation", "")
-    response_language = result.get("language", "")
-
-    row = [
-        ip, date, time_of_day, input_text, input_intent, input_entity,
-        response_intent, response_entity, response_explanation, response_language,
-        f"{response_time:.2f}", model_name, model_provider, temperature
-    ]
-    
-    sheet.append_row(row)
+def log_to_sheet(row):
+    try:
+        sheet.append_row(row)
+    except Exception as e:
+        logging.warning(f"Error registrando en Google Sheets: {e}")
 
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
+    result, latency = await classify_input(req.user_input, req.intents, req.entities)
     ip = request.client.host
-    try:
-        result, response_time = classify_input(req.user_input, req.intents, req.entities)
-        log_to_gsheet(ip, req, result, response_time)
-
-        return {"result": result, "response_time": f"{response_time:.2f} seconds"}
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        error_details = str(e)
-        raise HTTPException(status_code=500, detail=f"Internal server error: {error_details}")
+    now = datetime.utcnow()
+    row = [
+        ip,
+        now.strftime("%Y-%m-%d"),
+        now.strftime("%H:%M:%S"),
+        req.user_input,
+        json.dumps(req.intents, ensure_ascii=False),
+        json.dumps(req.entities, ensure_ascii=False),
+        json.dumps(result.get("intents", []), ensure_ascii=False),
+        json.dumps(result.get("entities", {}), ensure_ascii=False),
+        result.get("explanation", ""),
+        result.get("language", ""),
+        f"{latency:.2f}",
+        model_name,
+        model_provider,
+        temperature
+    ]
+    executor.submit(log_to_sheet, row)
+    return {"result": result, "response_time": f"{latency:.2f}s"}
 
 @app.get("/health")
 async def health_check():
