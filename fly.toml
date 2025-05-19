@@ -6,7 +6,7 @@ primary_region = 'mad'
 [http_service]
   internal_port = 8000
   force_https = true
-  auto_stop_machines = 'stop'
+  auto_stop_machines = false
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
@@ -15,3 +15,7 @@ primary_region = 'mad'
   memory = '1gb'
   cpu_kind = 'shared'
   cpus = 1
+
+[experimental]
+  kill_signal = "SIGINT"
+  kill_timeout = "5s"
