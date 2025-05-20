@@ -58,7 +58,11 @@ async def classify_input(user_input: str, intents: dict, entities: dict):
     )
     start = time.time()
     try:
-        response = llm_typed.invoke(prompt)
+        response_raw = llm.invoke(prompt)
+        output = response_raw if isinstance(response_raw, dict) else response_raw.dict()
+        if not isinstance(output.get("entities", {}), dict):
+            output["entities"] = {}
+        response = Classification(**output)
     except Exception as e:
         logging.error(f"LLM invocation error: {e}")
         raise HTTPException(status_code=500, detail="Error procesando el modelo")
