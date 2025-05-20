@@ -11,43 +11,65 @@ import json
 import base64
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, Any, Tuple
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 app = FastAPI()
 
 REQUIRED = ["SHEET_URL", "CREDS", "GROQ_API_KEY", "MODEL_NAME", "MODEL_PROVIDER", "MODEL_TEMPERATURE"]
+
 for var in REQUIRED:
-    if not os.getenv(var):
-        raise RuntimeError(f"Falta la variable de entorno: {var}")
+    val = os.getenv(var)
+    if val is None or val.strip() == "":
+        raise RuntimeError(f"Falta la variable de entorno obligatoria: {var}")
 
 def init_sheet():
-    data = json.loads(base64.b64decode(os.getenv("CREDS")).decode())
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_dict(data, scope)
-    return gspread.authorize(creds).open_by_url(os.getenv("SHEET_URL")).sheet1
+    try:
+        creds_b64 = os.getenv("CREDS")
+        creds_json = base64.b64decode(creds_b64).decode()
+        data = json.loads(creds_json)
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(data, scope)
+        gc = gspread.authorize(creds)
+        sheet = gc.open_by_url(os.getenv("SHEET_URL")).sheet1
+        logging.info("Google Sheets inicializado correctamente")
+        return sheet
+    except Exception as e:
+        logging.error(f"Error inicializando Google Sheets: {e}")
+        return None
+
 sheet = init_sheet()
 
 class ClassificationRequest(BaseModel):
     user_input: str = Field(..., description="Texto para clasificación")
-    intents: dict = Field(..., description="Intents posibles con descripciones")
-    entities: dict = Field(..., description="Entidades posibles con descripciones")
+    intents: Dict[str, str] = Field(..., description="Intents posibles con descripciones")
+    entities: Dict[str, str] = Field(..., description="Entidades posibles con descripciones")
 
 class Classification(BaseModel):
     intents: list = Field(..., description="Intents detectados en la entrada")
-    entities: dict = Field(..., description="Entidades extraídas y sus valores")
+    entities: Dict[str, Any] = Field(..., description="Entidades extraídas y sus valores")
     explanation: str = Field(..., description="Explicación de la clasificación")
     language: str = Field(..., description="Código de idioma ISO 639-1")
 
 model_name = os.getenv("MODEL_NAME")
 model_provider = os.getenv("MODEL_PROVIDER")
-temperature = float(os.getenv("MODEL_TEMPERATURE"))
+try:
+    temperature = float(os.getenv("MODEL_TEMPERATURE"))
+except ValueError:
+    raise RuntimeError("La variable MODEL_TEMPERATURE debe ser un número válido")
+
 llm = init_chat_model(model_name, model_provider=model_provider, temperature=temperature, api_key=os.getenv("GROQ_API_KEY"))
 llm_typed = llm.with_structured_output(Classification)
 
 executor = ThreadPoolExecutor(max_workers=2)
 
-async def classify_input(user_input: str, intents: dict, entities: dict):
+async def classify_input(user_input: str, intents: Dict[str, str], entities: Dict[str, str]) -> Tuple[Dict[str, Any], float]:
+    """
+    Invoca el modelo para clasificar la entrada del usuario.
+    Devuelve la respuesta y el tiempo de latencia.
+    """
     prompt = (
         "Extract the desired information from the following passage.\n"
         "Use the following list of possible intents for classification:\n" +
@@ -58,17 +80,37 @@ async def classify_input(user_input: str, intents: dict, entities: dict):
     )
     start = time.time()
     try:
-        response_raw = llm.invoke(prompt)
+        # Dependiendo de si invoke es async o no, se adapta:
+        if callable(getattr(llm_typed, "ainvoke", None)):
+            response_raw = await llm_typed.ainvoke(prompt)
+        else:
+            response_raw = llm_typed.invoke(prompt)
+        # response_raw puede ser dict o Pydantic model
         output = response_raw if isinstance(response_raw, dict) else response_raw.dict()
+        # Sanear campos
+        if not isinstance(output.get("intents", []), list):
+            output["intents"] = []
         if not isinstance(output.get("entities", {}), dict):
             output["entities"] = {}
+        if "explanation" not in output or not isinstance(output["explanation"], str):
+            output["explanation"] = ""
+        if "language" not in output or not isinstance(output["language"], str):
+            output["language"] = ""
         response = Classification(**output)
     except Exception as e:
-        logging.error(f"LLM invocation error: {e}")
+        logging.error(f"Error en invocación del modelo: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Error procesando el modelo")
-    return response.model_dump(), time.time() - start
+    latency = time.time() - start
+    return response.model_dump(), latency
 
-def log_to_sheet(row):
+def log_to_sheet(row: list):
+    """
+    Registra una fila en Google Sheets.
+    Maneja excepciones para evitar fallos críticos.
+    """
+    if sheet is None:
+        logging.warning("No se puede registrar en Google Sheets: hoja no inicializada")
+        return
     try:
         sheet.append_row(row)
     except Exception as e:
@@ -77,7 +119,7 @@ def log_to_sheet(row):
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
     result, latency = await classify_input(req.user_input, req.intents, req.entities)
-    ip = request.client.host
+    ip = request.client.host if request.client else "unknown"
     now = datetime.utcnow()
     row = [
         ip,
@@ -95,7 +137,10 @@ async def classify_via_api(req: ClassificationRequest, request: Request):
         model_provider,
         temperature
     ]
-    executor.submit(log_to_sheet, row)
+    try:
+        executor.submit(log_to_sheet, row)
+    except Exception as e:
+        logging.warning(f"Error al enviar tarea de logging a executor: {e}")
     return {"result": result, "response_time": f"{latency:.2f}s"}
 
 @app.get("/health")
