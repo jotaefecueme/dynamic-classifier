@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
+from langchain_core.prompts import ChatPromptTemplate
 from datetime import datetime
 import time
 from dotenv import load_dotenv
@@ -32,15 +33,6 @@ creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 client = gspread.authorize(creds)
 sheet = client.open_by_url(sheet_url).sheet1
 
-llm = init_chat_model(
-    model_name,
-    model_provider=model_provider,
-    temperature=temperature,
-    api_key=groq_api_key
-).with_structured_output(BaseModel)
-
-db_executor = ThreadPoolExecutor(max_workers=2)
-
 class ClassificationRequest(BaseModel):
     user_input: str = Field(..., description="Text provided by the user for classification.")
     intents: dict = Field(..., description="Dictionary of possible intents with their descriptions.")
@@ -52,11 +44,19 @@ class Classification(BaseModel):
     explanation: str = Field(..., description="Explanation of how the intents and entities were identified.")
     language: str = Field(..., description="Language code (ISO 639-1) of the input, e.g., 'en' or 'es'.")
 
+llm = init_chat_model(
+    model_name,
+    model_provider=model_provider,
+    temperature=temperature,
+    api_key=groq_api_key
+).with_structured_output(Classification)
+
+db_executor = ThreadPoolExecutor(max_workers=2)
+
 async def classify_input(user_input: str, intents: dict, entities: dict):
-    # Construir prompt en string simple
     intents_desc = "\n".join(f"- {k}: {v}" for k, v in intents.items())
     entities_desc = "\n".join(f"- {k}: {v}" for k, v in entities.items())
-    prompt = f"""
+    prompt_str = f"""
 Extract the desired information from the following passage.
 Use the following list of possible intents for classification:
 {intents_desc}
@@ -68,9 +68,9 @@ User input:
 
     start = time.time()
     try:
-        result = await asyncio.to_thread(lambda: llm.invoke(prompt))
+        result = await asyncio.to_thread(lambda: llm.invoke(prompt_str))
         output = result.model_dump()
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="Error processing the input with the model.")
     latency = time.time() - start
     return output, latency
@@ -96,7 +96,7 @@ async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, respo
     try:
         sheet.append_row(row)
     except Exception:
-        pass  
+        pass
 
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
