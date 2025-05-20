@@ -1,3 +1,4 @@
+```python
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
