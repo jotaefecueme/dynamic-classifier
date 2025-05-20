@@ -1,4 +1,3 @@
-```python
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
@@ -16,99 +15,80 @@ import asyncio
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-app = FastAPI()
+# FastAPI app
+tmp_app = FastAPI()
+app = tmp_app
 
-# Carga de configuración
-REQUIRED_VARS = ["SHEET_URL", "CREDS", "GROQ_API_KEY", "MODEL_NAME", "MODEL_PROVIDER", "MODEL_TEMPERATURE"]
-for var in REQUIRED_VARS:
-    if not os.getenv(var):
-        raise RuntimeError(f"Falta la variable de entorno: {var}")
-
+# Load environment variables
 sheet_url = os.getenv("SHEET_URL")
 creds_base64 = os.getenv("CREDS")
 groq_api_key = os.getenv("GROQ_API_KEY")
 model_name = os.getenv("MODEL_NAME")
 model_provider = os.getenv("MODEL_PROVIDER")
-temperature = float(os.getenv("MODEL_TEMPERATURE"))
+temperature = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
 
-# Inicialización de Google Sheets
-data = json.loads(base64.b64decode(creds_base64).decode('utf-8'))
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(data, scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_url(sheet_url).sheet1
+if not sheet_url or not creds_base64 or not groq_api_key:
+    raise RuntimeError("Missing required environment variables: SHEET_URL, CREDS, GROQ_API_KEY")
 
-# Modelos de datos
+# Initialize Google Sheets client (reuse in memory, no file write)
+try:
+    creds_dict = json.loads(base64.b64decode(creds_base64))
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    gc = gspread.authorize(ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope))
+    sheet = gc.open_by_url(sheet_url).sheet1
+    logging.info("Google Sheets client initialized")
+except Exception as e:
+    logging.error(f"Error initializing Google Sheets: {e}")
+    sheet = None
+
+# Define request/response models
 class ClassificationRequest(BaseModel):
-    user_input: str = Field(..., description="Texto para clasificación")
-    intents: dict = Field(..., description="Intents posibles con descripciones")
-    entities: dict = Field(..., description="Entidades posibles con descripciones")
+    user_input: str = Field(..., description="Text provided by the user for classification.")
+    intents: dict = Field(..., description="Dictionary of possible intents with their descriptions.")
+    entities: dict = Field(..., description="Dictionary of possible entities with their descriptions.")
 
 class ClassificationOutput(BaseModel):
-    intents: list = Field(default_factory=list)
-    entities: dict = Field(default_factory=dict)
-    explanation: str = ""
-    language: str = ""
+    intents: list = Field(..., description="List of intents detected in the user's input.")
+    entities: dict = Field(..., description="Dictionary of extracted entities and their values.")
+    explanation: str = Field(..., description="Explanation of how the intents and entities were identified.")
+    language: str = Field(..., description="Language code (ISO 639-1) of the input.")
 
-# Inicialización del LLM solo una vez
-tmp_llm = init_chat_model(
-    model_name,
-    model_provider=model_provider,
-    temperature=temperature,
-    api_key=groq_api_key
-)
+try:
+    llm = init_chat_model(model_name, model_provider=model_provider, temperature=temperature, api_key=groq_api_key)
+    llm = llm.with_structured_output(ClassificationOutput)
+    logging.info("LLM initialized")
+except Exception as e:
+    logging.error(f"Error initializing LLM: {e}")
+    raise RuntimeError("LLM initialization failed")
 
-async def classify_input(user_input: str, intents: dict, entities: dict) -> tuple[dict, float]:
-    """Invoca el LLM y sanea la respuesta garantizando tipos correctos."""
-    # Construir prompt simple
+async def classify_input(user_input: str, intents: dict, entities: dict):
     prompt = (
         "Extract the desired information from the following passage.\n"
-        "Possible intents:\n" + "\n".join(f"- {k}: {v}" for k, v in intents.items()) +
-        "\nPossible entities:\n" + "\n".join(f"- {k}: {v}" for k, v in entities.items()) +
-        "\nUser input:\n" + user_input
+        "Possible intents:\n" + "\n".join(f"- {k}: {v}" for k, v in intents.items()) + "\n"
+        "Possible entities:\n" + "\n".join(f"- {k}: {v}" for k, v in entities.items()) + "\n"
+        "User input:\n" + user_input
     )
     start = time.time()
     try:
-        # Llamada al LLM
-        response = tmp_llm.invoke(prompt)
-        # Obtener JSON raw
-        raw = response.content if hasattr(response, 'content') else response
-        data = json.loads(raw) if isinstance(raw, str) else raw
+        response = llm.invoke(prompt)
+        output = response.model_dump() if hasattr(response, 'model_dump') else response
+        if not isinstance(output.get("entities"), dict):
+            output["entities"] = {}
+        if not isinstance(output.get("intents"), list):
+            output["intents"] = []
+        output.setdefault("explanation", "")
+        output.setdefault("language", "")
+        result = ClassificationOutput(**output)
     except Exception as e:
-        logging.error("Error invoking LLM", exc_info=True)
-        raise HTTPException(status_code=500, detail="Error procesando el modelo")
-    finally:
-        elapsed = time.time() - start
+        logging.error(f"LLM invocation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Error processing the input with the model.")
+    latency = time.time() - start
+    return result.dict(), latency
 
-    # Saneamiento robusto
-    intents_out = data.get("intents")
-    entities_out = data.get("entities")
-    if not isinstance(intents_out, list):
-        logging.warning("LLM returned non-list for intents, coercing to empty list")
-        intents_out = []
-    if not isinstance(entities_out, dict):
-        logging.warning("LLM returned non-dict for entities, coercing to empty dict")
-        entities_out = {}
-    explanation = data.get("explanation", "")
-    language = data.get("language", "")
-
-    result = {
-        "intents": intents_out,
-        "entities": entities_out,
-        "explanation": explanation,
-        "language": language
-    }
-    # Validar estructura
-    try:
-        ClassificationOutput(**result)
-    except Exception as e:
-        logging.error("Validation error on output schema", exc_info=True)
-        # Forzar valores mínimos
-        result = ClassificationOutput().dict()
-
-    return result, elapsed
-
-async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_time: float):
+async def log_to_sheet(ip: str, req: ClassificationRequest, result: dict, latency: float):
+    if not sheet:
+        logging.warning("Sheet client not initialized, skipping log")
+        return
     now = datetime.utcnow()
     row = [
         ip,
@@ -117,26 +97,25 @@ async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, respo
         req.user_input,
         json.dumps(req.intents, ensure_ascii=False),
         json.dumps(req.entities, ensure_ascii=False),
-        json.dumps(result.get("intents", []), ensure_ascii=False),
-        json.dumps(result.get("entities", {}), ensure_ascii=False),
-        result.get("explanation", ""),
-        result.get("language", ""),
-        f"{response_time:.2f}",
+        json.dumps(result.get("intents"), ensure_ascii=False),
+        json.dumps(result.get("entities"), ensure_ascii=False),
+        result.get("explanation"),
+        result.get("language"),
+        f"{latency:.2f}",
         model_name,
         model_provider,
         temperature
     ]
     try:
         await asyncio.to_thread(sheet.append_row, row)
-    except Exception:
-        logging.warning("Failed to log to Google Sheets", exc_info=True)
+    except Exception as e:
+        logging.warning(f"Failed to log to sheet: {e}")
 
 @app.post("/classify", response_model=dict)
 async def classify_via_api(req: ClassificationRequest, request: Request):
     ip = request.client.host if request.client else "unknown"
     result, latency = await classify_input(req.user_input, req.intents, req.entities)
-    # Logging en background
-    asyncio.create_task(log_to_gsheet(ip, req, result, latency))
+a    asyncio.create_task(log_to_sheet(ip, req, result, latency))
     return {"result": result, "response_time": f"{latency:.2f}s"}
 
 @app.get("/health")
@@ -146,4 +125,3 @@ async def health_check():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-```
