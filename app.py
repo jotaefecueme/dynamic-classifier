@@ -12,10 +12,19 @@ import json
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import asyncio
+import psutil
 
 load_dotenv()
 
 app = FastAPI()
+
+@app.middleware("http")
+async def log_request_time(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+    print(f"[{datetime.utcnow().isoformat()}] {request.method} {request.url.path} - {duration:.3f}s")
+    return response
 
 sheet_url = os.getenv("SHEET_URL")
 creds_base64 = os.getenv("CREDS")  
@@ -41,7 +50,6 @@ class ClassificationRequest(BaseModel):
 class Classification(BaseModel):
     intents: list = Field(..., description="List of intents detected in the user's input.")
     entities: dict = Field(..., description="Dictionary of extracted entities and their values.")
-    explanation: str = Field(..., description="Explanation of how the intents and entities were identified.")
     language: str = Field(..., description="Language code (ISO 639-1) of the input, e.g., 'en' or 'es'.")
 
 llm = init_chat_model(
@@ -73,6 +81,11 @@ User input:
     except Exception:
         raise HTTPException(status_code=500, detail="Error processing the input with the model.")
     latency = time.time() - start
+
+    process = psutil.Process(os.getpid())
+    mem_usage = process.memory_info().rss / 1024**2 
+    print(f"[{datetime.utcnow().isoformat()}] Inference time: {latency:.3f}s | Memory usage: {mem_usage:.2f} MB")
+
     return output, latency
 
 async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_time: float):
@@ -86,7 +99,7 @@ async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, respo
         json.dumps(req.entities, ensure_ascii=False),
         json.dumps(result.get("intents", []), ensure_ascii=False),
         json.dumps(result.get("entities", {}), ensure_ascii=False),
-        result.get("explanation", ""),
+        "",
         result.get("language", ""),
         f"{response_time:.2f}",
         model_name,
