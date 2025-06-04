@@ -116,14 +116,14 @@ async def classify(req: ClassificationRequest, request: Request):
     result, infer_time = await classify_input(req.user_input, req.intents, req.entities)
 
     now = datetime.utcnow()
-    date_str = now.date().isoformat()  
-    time_str = now.time().strftime("%H:%M:%S")  
+    date_obj = now.date() 
+    time_str = now.time().strftime("%H:%M:%S")
 
     ip = request.client.host
 
     asyncio.create_task(insert_log(
         ip=ip,
-        date=date_str,
+        date=date_obj, 
         time=time_str,
         input_text=req.user_input,
         input_intents=req.intents,
@@ -138,6 +138,7 @@ async def classify(req: ClassificationRequest, request: Request):
     ))
 
     return {"result": result, "infer_time": f"{infer_time:.3f} seconds"}
+
 
 @app.get("/health")
 async def health():
