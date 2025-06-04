@@ -59,9 +59,9 @@ async def insert_log(
     input_text: str,
     input_intents: dict,
     input_entities: dict,
-    response_intents: list,
-    response_entities: dict,
-    response_language: str,
+    output_intents: list,
+    output_entities: dict,
+    output_language: str,
     infer_time: float,
     model_name: str,
     model_provider: str,
@@ -70,7 +70,7 @@ async def insert_log(
     query = """
     INSERT INTO "dynamic-classifier" (
         ip, date, time, input_text, input_intents, input_entities, 
-        response_intents, response_entities, response_language, 
+        output_intents, output_entities, output_language, 
         infer_time, model_name, model_provider, temperature
     ) VALUES (
         $1, $2, $3, $4, $5::json, $6::json, $7::json, $8::json, $9, $10, $11, $12, $13
@@ -84,9 +84,9 @@ async def insert_log(
         input_text,
         input_intents,
         input_entities,
-        response_intents,
-        response_entities,
-        response_language,
+        output_intents,
+        output_entities,
+        output_language,
         infer_time,
         model_name,
         model_provider,
@@ -128,9 +128,9 @@ async def classify(req: ClassificationRequest, request: Request):
         input_text=req.user_input,
         input_intents=req.intents,
         input_entities=req.entities,
-        response_intents=result["intents"],
-        response_entities=result["entities"],
-        response_language=result["language"],
+        output_intents=result["intents"],
+        output_entities=result["entities"],
+        output_language=result["language"],
         infer_time=infer_time,
         model_name=MODEL_NAME,
         model_provider=MODEL_PROVIDER,
