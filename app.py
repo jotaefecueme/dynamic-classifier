@@ -55,7 +55,7 @@ async def shutdown():
 async def insert_log(
     ip: str,
     date: str,
-    hour: str,
+    time: str,
     input_text: str,
     input_intents: dict,
     input_entities: dict,
@@ -69,7 +69,7 @@ async def insert_log(
 ):
     query = """
     INSERT INTO "dynamic-classifier" (
-        ip, date, hour, input_text, input_intents, input_entities, 
+        ip, date, time, input_text, input_intents, input_entities, 
         response_intents, response_entities, response_language, 
         infer_time, model_name, model_provider, temperature
     ) VALUES (
@@ -80,7 +80,7 @@ async def insert_log(
         query,
         ip,
         date,
-        hour,
+        time,
         input_text,
         input_intents,
         input_entities,
@@ -117,14 +117,14 @@ async def classify(req: ClassificationRequest, request: Request):
 
     now = datetime.utcnow()
     date_str = now.date().isoformat()  
-    hour_str = now.time().strftime("%H:%M:%S")  
+    time_str = now.time().strftime("%H:%M:%S")  
 
     ip = request.client.host
 
     asyncio.create_task(insert_log(
         ip=ip,
         date=date_str,
-        hour=hour_str,
+        time=time_str,
         input_text=req.user_input,
         input_intents=req.intents,
         input_entities=req.entities,
