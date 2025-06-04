@@ -1,12 +1,12 @@
 import os
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, date as DateType
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
-import asyncpg 
+import asyncpg
 import json
 
 load_dotenv()
@@ -15,7 +15,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq")
 TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
-DATABASE_URL = os.getenv("DATABASE_URL")  
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not GROQ_API_KEY:
     raise RuntimeError("The environment variable 'GROQ_API_KEY' is required.")
@@ -55,8 +55,8 @@ async def shutdown():
 
 async def insert_log(
     ip: str,
-    date: str,
-    time: str,
+    date: DateType,
+    log_time: str,
     input_text: str,
     input_intents: dict,
     input_entities: dict,
@@ -81,7 +81,7 @@ async def insert_log(
         query,
         ip,
         date,
-        time,
+        log_time,
         input_text,
         json.dumps(input_intents),
         json.dumps(input_entities),
@@ -108,8 +108,8 @@ async def classify_input(user_input: str, intents: dict, entities: dict):
         result = await asyncio.to_thread(lambda: llm.invoke(prompt))
         infer_time = time.perf_counter() - start
         output = result.model_dump()
-    except Exception:
-        raise HTTPException(status_code=500, detail="Error processing the input with the model.")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing the input with the model: {e}")
     return output, infer_time
 
 @app.post("/classify")
@@ -125,7 +125,7 @@ async def classify(req: ClassificationRequest, request: Request):
     asyncio.create_task(insert_log(
         ip=ip,
         date=date_obj,
-        time=time_str,
+        log_time=time_str,
         input_text=req.user_input,
         input_intents=req.intents,
         input_entities=req.entities,
