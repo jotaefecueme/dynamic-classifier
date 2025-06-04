@@ -68,7 +68,7 @@ async def insert_log(
     temperature: float,
 ):
     query = """
-    INSERT INTO logs (
+    INSERT INTO dynamic-classifier (
         ip, date, hour, input_text, input_intents, input_entities, 
         response_intents, response_entities, response_language, 
         infer_time, model_name, model_provider, temperature
