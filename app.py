@@ -117,14 +117,14 @@ async def classify(req: ClassificationRequest, request: Request):
     result, infer_time = await classify_input(req.user_input, req.intents, req.entities)
 
     now = datetime.utcnow()
-    date_str = now.date().isoformat()  
+    date_obj = now.date()
     time_str = now.time().strftime("%H:%M:%S")
 
     ip = request.client.host
 
     asyncio.create_task(insert_log(
         ip=ip,
-        date=date_str,
+        date=date_obj,
         time=time_str,
         input_text=req.user_input,
         input_intents=req.intents,
