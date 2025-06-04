@@ -1,6 +1,8 @@
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from langchain.chat_models import init_chat_model
+from langchain.callbacks.langsmith import LangSmithCallbackHandler
+from langchain.callbacks.manager import CallbackManager
 from datetime import datetime
 import time
 import os
@@ -24,9 +26,14 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODEL_NAME = os.getenv("MODEL_NAME")
 MODEL_PROVIDER = os.getenv("MODEL_PROVIDER")
 TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
+LANGSMITH_API_KEY = os.getenv("LANGSMITH_API_KEY")
 
 if not GROQ_API_KEY:
     raise RuntimeError("The environment variable 'GROQ_API_KEY' is required.")
+if not LANGSMITH_API_KEY:
+    raise RuntimeError("The environment variable 'LANGSMITH_API_KEY' is required.")
+
+callback_manager = CallbackManager([LangSmithCallbackHandler(api_key=LANGSMITH_API_KEY)])
 
 class ClassificationRequest(BaseModel):
     user_input: str
@@ -42,7 +49,8 @@ llm = init_chat_model(
     MODEL_NAME,
     model_provider=MODEL_PROVIDER,
     temperature=TEMPERATURE,
-    api_key=GROQ_API_KEY
+    api_key=GROQ_API_KEY,
+    callback_manager=callback_manager
 ).with_structured_output(Classification)
 
 async def classify_input(user_input: str, intents: dict, entities: dict):
