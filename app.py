@@ -1,18 +1,12 @@
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 from langchain.chat_models import init_chat_model
-from langchain_core.prompts import ChatPromptTemplate
 from datetime import datetime
 import time
-from dotenv import load_dotenv
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import os
-import json
-import base64
-from concurrent.futures import ThreadPoolExecutor
 import asyncio
 import psutil
+from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -23,103 +17,78 @@ async def log_request_time(request: Request, call_next):
     start = time.time()
     response = await call_next(request)
     duration = time.time() - start
-    print(f"[{datetime.utcnow().isoformat()}] {request.method} {request.url.path} - {duration:.3f}s")
+    print(f"[{datetime.utcnow().isoformat()}] TOTAL {request.method} {request.url.path} - {duration:.3f}s")
     return response
 
-sheet_url = os.getenv("SHEET_URL")
-creds_base64 = os.getenv("CREDS")  
-groq_api_key = os.getenv("GROQ_API_KEY")
-model_name = os.getenv("MODEL_NAME")
-model_provider = os.getenv("MODEL_PROVIDER")
-temperature = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+MODEL_NAME = os.getenv("MODEL_NAME")
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER")
+TEMPERATURE = float(os.getenv("MODEL_TEMPERATURE", "0.0"))
 
-if not sheet_url or not creds_base64 or not groq_api_key:
-    raise ValueError("The environment variables 'SHEET_URL', 'CREDS', and 'GROQ_API_KEY' are required.")
-
-creds_dict = json.loads(base64.b64decode(creds_base64).decode('utf-8'))
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-client = gspread.authorize(creds)
-sheet = client.open_by_url(sheet_url).sheet1
+if not GROQ_API_KEY:
+    raise RuntimeError("The environment variable 'GROQ_API_KEY' is required.")
 
 class ClassificationRequest(BaseModel):
-    user_input: str = Field(..., description="Text provided by the user for classification.")
-    intents: dict = Field(..., description="Dictionary of possible intents with their descriptions.")
-    entities: dict = Field(..., description="Dictionary of possible entities with their descriptions.")
+    user_input: str
+    intents: dict
+    entities: dict
 
 class Classification(BaseModel):
-    intents: list = Field(..., description="List of intents detected in the user's input.")
-    entities: dict = Field(..., description="Dictionary of extracted entities and their values.")
-    language: str = Field(..., description="Language code (ISO 639-1) of the input, e.g., 'en' or 'es'.")
+    intents: list
+    entities: dict
+    language: str
 
 llm = init_chat_model(
-    model_name,
-    model_provider=model_provider,
-    temperature=temperature,
-    api_key=groq_api_key
+    MODEL_NAME,
+    model_provider=MODEL_PROVIDER,
+    temperature=TEMPERATURE,
+    api_key=GROQ_API_KEY
 ).with_structured_output(Classification)
 
-db_executor = ThreadPoolExecutor(max_workers=2)
-
 async def classify_input(user_input: str, intents: dict, entities: dict):
-    intents_desc = "\n".join(f"- {k}: {v}" for k, v in intents.items())
-    entities_desc = "\n".join(f"- {k}: {v}" for k, v in entities.items())
-    prompt_str = f"""
-Extract the desired information from the following passage.
-Use the following list of possible intents for classification:
-{intents_desc}
-Use the following list of possible entities to detect:
-{entities_desc}
-User input:
-{user_input}
-"""
+    t0 = time.time()
+    prompt = (
+        "Extract the desired information from the following passage.\n"
+        "Use the following list of possible intents for classification:\n"
+        + "\n".join(f"- {k}: {v}" for k, v in intents.items()) + "\n"
+        "Use the following list of possible entities to detect:\n"
+        + "\n".join(f"- {k}: {v}" for k, v in entities.items()) + "\n"
+        f"User input:\n{user_input}"
+    )
+    t1 = time.time()
 
-    start = time.time()
     try:
-        result = await asyncio.to_thread(lambda: llm.invoke(prompt_str))
+        t2 = time.time()
+        result = await asyncio.to_thread(lambda: llm.invoke(prompt))
+        t3 = time.time()
         output = result.model_dump()
+        t4 = time.time()
     except Exception:
         raise HTTPException(status_code=500, detail="Error processing the input with the model.")
-    latency = time.time() - start
 
-    process = psutil.Process(os.getpid())
-    mem_usage = process.memory_info().rss / 1024**2 
-    print(f"[{datetime.utcnow().isoformat()}] Inference time: {latency:.3f}s | Memory usage: {mem_usage:.2f} MB")
+    latency_total = t4 - t0
+    time_prompt_prep = t1 - t0
+    time_model_call = t3 - t2
+    time_output_process = t4 - t3
 
-    return output, latency
+    mem = psutil.Process().memory_info().rss / 1024**2
 
-async def log_to_gsheet(ip: str, req: ClassificationRequest, result: dict, response_time: float):
-    now = datetime.utcnow()
-    row = [
-        ip,
-        now.strftime("%Y-%m-%d"),
-        now.strftime("%H:%M:%S"),
-        req.user_input,
-        json.dumps(req.intents, ensure_ascii=False),
-        json.dumps(req.entities, ensure_ascii=False),
-        json.dumps(result.get("intents", []), ensure_ascii=False),
-        json.dumps(result.get("entities", {}), ensure_ascii=False),
-        "",
-        result.get("language", ""),
-        f"{response_time:.2f}",
-        model_name,
-        model_provider,
-        temperature
-    ]
-    try:
-        sheet.append_row(row)
-    except Exception:
-        pass
+    print(f"[{datetime.utcnow().isoformat()}] "
+          f"TOTAL_INFER {latency_total:.3f}s | "
+          f"PROMPT_PREP {time_prompt_prep:.3f}s | "
+          f"MODEL_CALL {time_model_call:.3f}s | "
+          f"OUTPUT_PROC {time_output_process:.3f}s | "
+          f"MEM {mem:.2f} MB")
 
-@app.post("/classify", response_model=dict)
-async def classify_via_api(req: ClassificationRequest, request: Request):
-    ip = request.client.host if request.client else ""
-    result, response_time = await classify_input(req.user_input, req.intents, req.entities)
-    asyncio.create_task(log_to_gsheet(ip, req, result, response_time))
-    return {"result": result, "response_time": f"{response_time:.2f} seconds"}
+    return output, latency_total
+
+@app.post("/classify")
+async def classify(req: ClassificationRequest):
+    result, latency = await classify_input(req.user_input, req.intents, req.entities)
+    return {"result": result, "response_time": f"{latency:.2f} seconds"}
 
 @app.get("/health")
-async def health_check():
+async def health():
     return {"status": "ok"}
 
 if __name__ == "__main__":
