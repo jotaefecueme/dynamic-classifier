@@ -116,7 +116,7 @@ async def classify_input(user_input: str, intents: dict, entities: dict):
 async def classify(req: ClassificationRequest, request: Request):
     result, infer_time = await classify_input(req.user_input, req.intents, req.entities)
 
-    now = datetime.utcnow()
+    now = datetime.now()
     date_obj = now.date()
     time_str = now.time().strftime("%H:%M:%S")
 
