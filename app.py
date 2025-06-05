@@ -8,6 +8,7 @@ from langchain.chat_models import init_chat_model
 from dotenv import load_dotenv
 import asyncpg
 import json
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
